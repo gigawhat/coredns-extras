@@ -1,0 +1,69 @@
+name: Build
+on: [push]
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  COREDNS_REPO: coredns/coredns
+  COREDNS_REF: v1.8.4
+  GO_VER: "1.17"
+jobs:
+  patch-and-build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: checkout coredns repo
+        uses: actions/checkout@v2
+        with:
+          repository: ${{ env.COREDNS_REPO }}
+          ref: ${{ env.COREDNS_REF }}
+          fetch-depth: 0
+      - name: setup go
+        uses: actions/setup-go@v2
+        with:
+          go-version: ${{ env.GO_VER }}
+      - name: print info
+        run: |
+          go version
+          docker version
+          printenv | sort
+      - name: patch and build
+        run: |
+          go get
+          echo "alternate:github.com/coredns/alternate" >> plugin.cfg
+          echo "k8s_gateway:github.com/ori-edge/k8s_gateway" >> plugin.cfg
+          go get github.com/coredns/alternate
+          go get github.com/ori-edge/k8s_gateway
+          go generate
+          make coredns SYSTEM="GOOS=linux"
+      - name: list plugins
+        run: |
+          ./coredns -plugins
+      - name: log in to github container registry
+        uses: docker/login-action@v1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: docker meta
+        id: meta
+        uses: docker/metadata-action@v3
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+      - name: set tags if main
+        id: tags
+        run: |
+          if [ ${GITHUB_REF} == "refs/heads/main" ]
+          then
+            echo "::set-output name=tags::${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest,${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.COREDNS_REF }}-${GITHUB_RUN_NUMBER}"
+          else
+            echo "::set-output name=tags::${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$(git rev-parse --short HEAD)"
+          fi
+      - name: Build and push
+        uses: docker/build-push-action@v2
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
